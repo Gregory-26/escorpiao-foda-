@@ -1,12 +1,12 @@
 **Apresentação do Projeto – Escorpião Interativo 🦂**
 
-Eu sou o **Gregory** 
+ sou o **Gregory** 
 
-Atualmente estou aprendendo **JavaScript** e melhorando cada vez mais minhas habilidades em **HTML e CSS**. Pra praticar e também me desafiar um pouco (ou bastante…), resolvi criar um projeto diferente: um **escorpião animado que segue o cursor do mouse**.
+Atualmente estou aprendendo **JavaScript** e melhorando cada vez mais minhas habilidades em **HTML e CSS**. Pra praticar e também me desafiar um pouco (ou bastante...), resolvi criar um projeto diferente: um **escorpião animado que segue o cursor do mouse**.
 
 A ideia parecia simples no começo… até eu perceber que fazer um escorpião parecer vivo dá um trabalho absurdo KKKK.
 
-Nesse projeto usei **HTML** pra montar a estrutura da página, **CSS** pra deixar o visual mais limpo e destacar a animação, e o grosso do trabalho ficou no **JavaScript**, que foi onde a diversão (e o sofrimento) aconteceram.
+Nesse projeto usei **HTML** pra montar a estrutura da página, **CSS** pra deixar o visual mais limpo e destacar a animação, e o grosso do trabalho ficou no **JavaScript**, que foi onde a diversão (e o sofrimento) aconteceram
 
 Pra fazer o escorpião funcionar eu trabalhei com coisas como:
 
