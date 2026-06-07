@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Escorpião Procedural</title>
+  <style>
+    /* sem margem pra canvas ficar colado na tela */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; background: #000; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+
+
+//  ESCORPIÃO PROCEDURAL -
+
+
+// pega o canvas e o contexto 2d pra poder desenhar
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+
+// largura e altura da tela (atualiza quando redimensiona)
+var W, H;
+function resize() {
+  W = canvas.width  = window.innerWidth  || 680;
+  H = canvas.height = window.innerHeight || 500;
+}
+resize();
+window.addEventListener('resize', resize);
+
+
+
+//  POSIÇÃO DO MOUSE
+//  só guardo x e y, atualiza no evento mousemove
+
+var mouse = { x: W / 2, y: H / 2 };
+document.addEventListener('mousemove', function(e) {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+});
+
+
+//  FUNÇÕES AUXILIARES DE MATEMÁTICA
+//  a pior parte de programar o escorpião,pqp muito dificil mesmo usei bastante ia aqui kkkk 
+// lerp = interpolação linear
+// mistura dois valores com base em t (0 = tudo a, 1 = tudo b)
+// ex: lerp(0, 100, 0.5) = 50
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+// igual o lerp mas pra ângulos
+// evita o problema de girar 350 graus quando podia girar 10
+function lerpAngle(a, b, t) {
+  var d = b - a;
+  // corrige pra sempre pegar o caminho mais curto
+  while (d >  Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+// distância entre dois pontos, pitágoras básico
+function dist(ax, ay, bx, by) {
+  return Math.sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+}
+
+// clamp = limita um valor entre mínimo e máximo
+// ex: clamp(150, 0, 100) = 100
+function clamp(v, mn, mx) {
+  return Math.max(mn, Math.min(mx, v));
+}
+
+//  CLASSE CHAIN (corrente de segmentos)
+//  Simula uma "corrente" de ossos conectados
+//  Uso ela pro corpo e pra cauda do escorpião
+//  Como funciona: FABRIK (algoritmo de IK)
+//  - o primeiro nó vai em direção ao alvo
+//  - os outros ficam pendurados atrás seguindo o anterior
+//  Pra alterar o comportamento:
+//  - stiffness: quanto cada nó puxa o seguinte (0.1 = mole, 0.9 = rígido)
+//  - segLen: tamanho de cada segmento da corrente
+//  - n: quantidade de segmentos
+
+function Chain(x, y, n, segLen) {
+  this.segs = [];
+  // cria todos os segmentos em linha horizontal
+  for (var i = 0; i < n; i++) {
+    this.segs.push({ x: x + i * segLen, y: y, a: 0 });
+  }
+  this.segLen = segLen;
+  this.stiffness = 0.35; // quanto os nós se arrastam (0 = não move, 1 = instantâneo)
+}
+
+// move a corrente em direção a tx, ty
+// angle = ângulo do primeiro nó (cabeça da corrente)
+Chain.prototype.follow = function(tx, ty, angle) {
+  var s = this.segs;
+
+  // o primeiro nó vai suavemente até o alvo
+  // o 0.2 aqui é a velocidade - aumenta pra ir mais rápido
+  s[0].x = lerp(s[0].x, tx, 0.2);
+  s[0].y = lerp(s[0].y, ty, 0.2);
+
+  if (angle !== undefined) {
+    s[0].a = lerpAngle(s[0].a, angle, 0.15);
+  } else {
+    s[0].a = Math.atan2(ty - (s[1] ? s[1].y : 0), tx - (s[1] ? s[1].x : 0));
+  }
+
+  // FABRIK: cada nó puxa o seguinte na direção certa
+  for (var i = 1; i < s.length; i++) {
+    var d = dist(s[i].x, s[i].y, s[i-1].x, s[i-1].y);
+    var ratio = (d - this.segLen) / d;
+    // move o nó atual em direção ao anterior
+    s[i].x += (s[i-1].x - s[i].x) * ratio * this.stiffness;
+    s[i].y += (s[i-1].y - s[i].y) * ratio * this.stiffness;
+    s[i].a = Math.atan2(s[i-1].y - s[i].y, s[i-1].x - s[i].x);
+  }
+};
+
+// pega um segmento pelo índice (com segurança, não estoura o array)
+Chain.prototype.getPoint = function(i) {
+  return this.segs[Math.min(i, this.segs.length - 1)];
+};
+
+// atalhos pra pegar primeiro e último nó
+Object.defineProperty(Chain.prototype, 'tail', { get: function() { return this.segs[this.segs.length - 1]; } });
+Object.defineProperty(Chain.prototype, 'head', { get: function() { return this.segs[0]; } });
+
+
+
+//  CLASSE LEG (perna com IK)
+//  Cada perna tem: quadril → joelho → pé
+//  Pra alterar:
+//  - thighLen: tamanho da coxa
+//  - shinLen: tamanho da canela
+//  - stepTimer > N: quanto tempo espera antes de dar um passo (menor = passos mais frequentes)
+//  - stepProgress += N: velocidade do passo (maior = passo mais rápido)
+//  - liftY: altura que o pé levanta no meio do passo
+//  - spread: o quanto a perna abre pra fora do corpo
+
+function Leg(hipX, hipY, side, thighLen, shinLen, defaultAngle) {
+  this.side = side;           // 1 = direita, -1 = esquerda
+  this.thighLen = thighLen;
+  this.shinLen = shinLen;
+  this.defaultAngle = defaultAngle; // ângulo padrão da perna em relação ao corpo
+
+  // posição inicial do pé
+  this.footX = hipX + Math.cos(defaultAngle) * (thighLen + shinLen);
+  this.footY = hipY + Math.sin(defaultAngle) * (thighLen + shinLen);
+
+  this.targetX = this.footX;
+  this.targetY = this.footY;
+
+  this.stepTimer    = Math.random() * 40; // timer aleatório pra as pernas não sincronizarem
+  this.stepping     = false;  // tá no meio de um passo agora?
+  this.stepProgress = 1;      // progresso do passo (0 = início, 1 = fim)
+  this.prevFootX    = this.footX; // posição anterior do pé (pra interpolar o passo)
+  this.prevFootY    = this.footY;
+  this.liftY        = 0;      // altura atual do levantamento do pé
+
+  // posição do joelho (calculada no update)
+  this.kneeX = this.footX;
+  this.kneeY = this.footY;
+}
+
+Leg.prototype.update = function(hipX, hipY, bodyAngle, speed) {
+  this.stepTimer++;
+  var legReach = this.thighLen + this.shinLen; // alcance máximo da perna esticada
+
+  // calcula onde o pé DEVERIA estar (posição ideal)
+  var spread  = this.thighLen * 1.4; // quanto a perna se abre pra fora
+  var forward = speed * 3;           // quanto avança pra frente (depende da velocidade)
+
+  var dx = Math.cos(bodyAngle + this.side * Math.PI / 2 + this.defaultAngle) * spread
+         + Math.cos(bodyAngle) * forward;
+  var dy = Math.sin(bodyAngle + this.side * Math.PI / 2 + this.defaultAngle) * spread
+         + Math.sin(bodyAngle) * forward;
+
+  var desiredX   = hipX + dx;
+  var desiredY   = hipY + dy;
+  var stepDist   = dist(this.footX, this.footY, desiredX, desiredY);
+
+  // se o pé tá longe demais do ideal E já esperou tempo suficiente → dá um passo
+  // aumenta 0.55 pra aceitar distâncias maiores antes de pisar (passos mais largos)
+  if (!this.stepping && stepDist > legReach * 0.55 && this.stepTimer > 10) {
+    this.stepping     = true;
+    this.stepProgress = 0;
+    this.prevFootX    = this.footX;
+    this.prevFootY    = this.footY;
+    // novo alvo: um pouco além da posição ideal (compensação de momentum)
+    this.targetX = desiredX + dx * 0.15;
+    this.targetY = desiredY + dy * 0.15;
+    this.stepTimer = 0;
+  }
+
+  // animação do passo: interpolação suave do pé do ponto antigo pro novo
+  if (this.stepping) {
+    this.stepProgress = Math.min(1, this.stepProgress + 0.12); // velocidade do passo
+    var t    = this.stepProgress;
+    var ease = t < 0.5 ? 2*t*t : -1 + (4 - 2*t) * t; // curva ease-in-out
+    this.footX = lerp(this.prevFootX, this.targetX, ease);
+    this.footY = lerp(this.prevFootY, this.targetY, ease);
+    this.liftY = -Math.sin(t * Math.PI) * 12; // arco do pé levantando (12 = altura máxima)
+    if (this.stepProgress >= 1) {
+      this.stepping = false;
+      this.liftY = 0;
+    }
+  }
+
+  // IK: calcula posição do joelho usando lei dos cossenos
+  // d = distância atual quadril→pé
+  var d = clamp(dist(hipX, hipY, this.footX, this.footY), 0.01, legReach * 0.99);
+  var baseAngle = Math.atan2(this.footY - hipY, this.footX - hipX);
+  var cosA = clamp(
+    (d*d + this.thighLen*this.thighLen - this.shinLen*this.shinLen) / (2 * d * this.thighLen),
+    -1, 1
+  );
+  // this.side faz o joelho dobrar pra fora no lado certo
+  var a1 = Math.acos(cosA) * this.side;
+  this.kneeX = hipX + Math.cos(baseAngle + a1) * this.thighLen;
+  this.kneeY = hipY + Math.sin(baseAngle + a1) * this.thighLen;
+};
+
+Leg.prototype.draw = function(hipX, hipY) {
+  var fy = this.footY + this.liftY; // aplica o levantamento do pé
+
+  ctx.save();
+
+  // --- contorno branco (desenhado primeiro, um pouco maior) ---
+  ctx.lineWidth   = 5;
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineCap     = 'round';
+  ctx.beginPath(); ctx.moveTo(hipX, hipY);       ctx.lineTo(this.kneeX, this.kneeY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(this.kneeX, this.kneeY); ctx.lineTo(this.footX, fy);   ctx.stroke();
+
+  // --- coxa (quadril → joelho) ---
+  ctx.lineWidth   = 3;
+  ctx.strokeStyle = '#cc1100';
+  ctx.shadowColor = '#ff2200';
+  ctx.shadowBlur  = 10;
+  ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.lineTo(this.kneeX, this.kneeY); ctx.stroke();
+
+  // --- canela (joelho → pé) ---
+  ctx.strokeStyle = '#991100';
+  ctx.lineWidth   = 2;
+  ctx.beginPath(); ctx.moveTo(this.kneeX, this.kneeY); ctx.lineTo(this.footX, fy); ctx.stroke();
+
+  // --- ponto do pé ---
+  ctx.beginPath();
+  ctx.arc(this.footX, fy, 3, 0, Math.PI * 2);
+  ctx.fillStyle   = '#ff4422';
+  ctx.shadowColor = '#ff2200';
+  ctx.shadowBlur  = 10;
+  ctx.fill();
+
+  ctx.restore();
+};
+
+//  CLASSE CLAW (pinça)
+//  Cada pinça tem: braço → antebraço → duas garras
+//  A abertura das garras depende da velocidade do escorpião
+//  side: 1 = direita, -1 = esquerda
+
+//  Pra alterar:
+//  - armLen, foreLen, clawLen: tamanho de cada parte
+//  - spread: ângulo que a pinça abre pra fora do corpo
+//  - openAmount: limite de abertura (clamp máximo)
+function Claw(side) {
+  this.side       = side;
+  this.openAmount = 0; // quanto a garra tá aberta agora (vai suavizando)
+}
+
+Claw.prototype.draw = function(bx, by, ba, speed) {
+  var armLen  = 36; // tamanho do braço principal
+  var foreLen = 22; // tamanho do antebraço
+  var clawLen = 18; // tamanho de cada garra
+
+  // posição do ombro
+  var spread = this.side * 0.45; // quanto a pinça aponta pra fora
+  var a0     = ba + spread;
+  var ax     = bx + Math.cos(a0) * armLen;
+  var ay     = by + Math.sin(a0) * armLen;
+
+  // posição do cotovelo
+  var a1 = a0 + this.side * 0.3;
+  var fx  = ax + Math.cos(a1) * foreLen;
+  var fy  = ay + Math.sin(a1) * foreLen;
+
+  // abertura da garra: quanto mais rápido, mais aberta
+  // 0.08 = suavidade da transição
+  this.openAmount = lerp(this.openAmount, clamp(speed * 0.8, 0.1, 0.8), 0.08);
+
+  // ponta da garra superior e inferior
+  var uc1x = fx + Math.cos(a1 - this.openAmount) * clawLen;
+  var uc1y = fy + Math.sin(a1 - this.openAmount) * clawLen;
+  var lc1x = fx + Math.cos(a1 + this.openAmount) * clawLen;
+  var lc1y = fy + Math.sin(a1 + this.openAmount) * clawLen;
+
+  ctx.save();
+
+  // --- contorno branco ---
+  ctx.lineWidth   = 5;
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineCap     = 'round';
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ax, ay); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(fx, fy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(uc1x, uc1y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(lc1x, lc1y); ctx.stroke();
+
+  // --- braços vermelho ---
+  ctx.shadowColor = '#ff2200';
+  ctx.shadowBlur  = 12;
+  ctx.strokeStyle = '#dd2200';
+  ctx.lineWidth   = 3;
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ax, ay); ctx.stroke();
+  ctx.lineWidth   = 2.5;
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(fx, fy); ctx.stroke();
+
+  // --- garras ---
+  ctx.lineWidth   = 2;
+  ctx.strokeStyle = '#ff4422';
+  ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(uc1x, uc1y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(lc1x, lc1y); ctx.stroke();
+
+  // --- articulações (bolinhas nas juntas) ---
+  ctx.shadowBlur  = 14;
+  ctx.shadowColor = '#ff0000';
+  ctx.beginPath(); ctx.arc(ax, ay, 4, 0, Math.PI * 2); ctx.fillStyle = '#cc2200'; ctx.fill();
+  ctx.beginPath(); ctx.arc(fx, fy, 3, 0, Math.PI * 2); ctx.fillStyle = '#ff4422'; ctx.fill();
+
+  ctx.restore();
+};
+
+
+
+//  CLASSE SCORPION (o bicho inteiro)
+//  Junta tudo: corpo, cauda, 8 pernas, 2 pinças, olhos, partículas
+//( essa parte foi complicada pqp kkkkkom muitos detalhes de física e animação, mas ficou bem legal no final)
+//  Física do movimento (pra alterar a velocidade/inércia):
+//  - accel: força de aceleração (aumenta o número final, ex: 4.2 → 6.0)
+//  - lerp vx/vy com 0.14: inércia lateral (menor = mais pesado)
+//  - lerpAngle com 0.07: velocidade de rotação (maior = vira mais rápido)
+//  - vx *= 0.82 quando perto: freio ao chegar no mouse
+
+function Scorpion() {
+  this.x     = W / 2;
+  this.y     = H / 2;
+  this.vx    = 0; // velocidade horizontal
+  this.vy    = 0; // velocidade vertical
+  this.angle = 0; // ângulo atual que o escorpião aponta
+  this.speed = 0; // magnitude da velocidade (pra animar pernas e pinças)
+  this.idleT = 0; // timer pra animações idle (oscilações quando parado)
+
+  // corpo: 8 segmentos de 14px cada
+  // pra deixar o corpo maior: aumenta o segLen (14) ou n (8)
+  this.body = new Chain(this.x, this.y, 8, 14);
+
+  // cauda: 10 segmentos de 18px cada (começa atrás do corpo)
+  // pra cauda mais longa: aumenta n (10) ou segLen (18)
+  this.tail = new Chain(this.x + 60, this.y, 10, 18);
+
+  // 4 pares de pernas (8 no total)
+  // legAngles define o ângulo padrão de cada par (-0.15 = perna mais à frente)
+  this.legs = [];
+  var legAngles = [-0.15, -0.05, 0.05, 0.15];
+  for (var i = 0; i < 4; i++) {
+    this.legs.push(new Leg(0, 0,  1, 28, 24, legAngles[i])); // lado direito
+    this.legs.push(new Leg(0, 0, -1, 28, 24, legAngles[i])); // lado esquerdo
+  }
+
+  // pinças esquerda e direita
+  this.clawL = new Claw(-1);
+  this.clawR = new Claw( 1);
+
+  // valores que pulsam pra fazer efeito de glow nos olhos e ferrão
+  this.eyeGlow   = 0;
+  this.stingGlow = 0;
+
+  // lista de partículas que saem do ferrão
+  this.particles = [];
+}
+
+Scorpion.prototype.update = function() {
+  this.idleT += 0.03; // incremento do timer idle (aumenta pra oscilar mais rápido)
+
+  // vetor do escorpião até o mouse
+  var tdx   = mouse.x - this.x;
+  var tdy   = mouse.y - this.y;
+  var tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+
+  // ângulo que aponta pro mouse
+  var targetAngle = Math.atan2(tdy, tdx);
+  if (tdist > 20) {
+    // 0.07 = velocidade de rotação (maior = vira mais rápido)
+    this.angle = lerpAngle(this.angle, targetAngle, 0.07);
+  }
+
+  // aceleração proporcional à distância do mouse
+  // o 4.2 no final é a velocidade máxima - aumenta pra ir mais rápido
+  var accel = clamp((tdist - 20) / 380, 0, 1) * 4.2;
+  this.vx = lerp(this.vx, Math.cos(this.angle) * accel, 0.14);
+  this.vy = lerp(this.vy, Math.sin(this.angle) * accel, 0.14);
+
+  // freia quando chega perto do mouse
+  if (tdist < 20) {
+    this.vx *= 0.82;
+    this.vy *= 0.82;
+  }
+
+  this.x += this.vx;
+  this.y += this.vy;
+  this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+
+  // corpo segue a cabeça (com +PI pra ficar atrás)
+  this.body.follow(this.x, this.y, this.angle + Math.PI);
+
+  // cauda oscila atrás do abdômen, balança lateralmente com o seno
+  var tailBase   = this.body.getPoint(6);
+  var tailTargetX = tailBase.x - Math.cos(this.angle) * 14
+                  + Math.sin(this.angle) * 20 * Math.sin(this.idleT * 0.7);
+  var tailTargetY = tailBase.y - Math.sin(this.angle) * 14
+                  - Math.cos(this.angle) * 20 * Math.sin(this.idleT * 0.7);
+  this.tail.follow(tailTargetX, tailTargetY);
+
+  // ferrão: ponta da cauda se move pra cima em curva
+  var stingBase  = this.tail.segs[8];
+  var stingAngle = this.angle + Math.PI + 1.8 + Math.sin(this.idleT * 0.9) * 0.4;
+  this.tail.segs[9].x = lerp(this.tail.segs[9].x, stingBase.x + Math.cos(stingAngle) * 20, 0.12);
+  this.tail.segs[9].y = lerp(this.tail.segs[9].y, stingBase.y + Math.sin(stingAngle) * 20 - 30, 0.12);
+
+  // atualiza cada perna com a posição do segmento do corpo correspondente
+  for (var i = 0; i < 4; i++) {
+    var seg = this.body.getPoint(i + 1);
+    this.legs[i * 2    ].update(seg.x, seg.y, this.angle, this.speed);
+    this.legs[i * 2 + 1].update(seg.x, seg.y, this.angle, this.speed);
+  }
+
+  // pulso dos olhos e ferrão usando onda senoidal
+  this.eyeGlow   = 0.7 + 0.3 * Math.sin(this.idleT * 2.1);
+  this.stingGlow = 0.6 + 0.4 * Math.sin(this.idleT * 3.3);
+
+  // partícula de veneno na ponta do ferrão (7% de chance por frame)
+  if (Math.random() < 0.07) {
+    var st = this.tail.segs[9];
+    this.particles.push({
+      x    : st.x,
+      y    : st.y,
+      vx   : (Math.random() - 0.5) * 1.5,
+      vy   : (Math.random() - 0.5) * 1.5 - 0.5,
+      life : 1,                              // vida começa em 1 (100%)
+      decay: 0.05 + Math.random() * 0.04,    // quanto perde de vida por frame
+      r    : 1 + Math.random() * 2           // tamanho da partícula
+    });
+  }
+  // remove partículas mortas (life <= 0)
+  this.particles = this.particles.filter(function(p) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= p.decay;
+    return p.life > 0;
+  });
+};
+
+
+// --- desenha o corpo segmentado ---
+Scorpion.prototype.drawBody = function() {
+  var s = this.body.segs;
+
+  // passa 1: contorno branco (linha mais grossa embaixo)
+  for (var i = 0; i < s.length - 1; i++) {
+    var t = i / (s.length - 1); // 0 na cabeça, 1 no fim do abdômen
+    var w = lerp(20, 8, t);     // largura vai diminuindo do pescoço pro rabo
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s[i].x, s[i].y);
+    ctx.lineTo(s[i+1].x, s[i+1].y);
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth   = w + 3;
+    ctx.lineCap     = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // passa 2: preenchimento preto
+  for (var i = 0; i < s.length - 1; i++) {
+    var t = i / (s.length - 1);
+    var w = lerp(20, 8, t);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s[i].x, s[i].y);
+    ctx.lineTo(s[i+1].x, s[i+1].y);
+    ctx.strokeStyle = '#0a0000';
+    ctx.lineWidth   = w;
+    ctx.lineCap     = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // passa 3: detalhe vermelho da coluna vertebral (linha fina brilhante)
+  for (var i = 0; i < s.length - 1; i++) {
+    var t = i / (s.length - 1);
+    var w = lerp(20, 8, t);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s[i].x, s[i].y);
+    ctx.lineTo(s[i+1].x, s[i+1].y);
+    ctx.strokeStyle = 'rgba(180,0,0,' + (0.55 - t * 0.2) + ')';
+    ctx.lineWidth   = w * 0.45; // linha fina proporcional à largura do segmento
+    ctx.lineCap     = 'round';
+    ctx.shadowColor = '#cc0000';
+    ctx.shadowBlur  = 10;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // passa 4: anéis brancos sutis nas juntas dos segmentos
+  for (var i = 1; i < s.length - 1; i++) {
+    var seg = s[i];
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(seg.x, seg.y, lerp(9, 4, i / 7), 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+    ctx.restore();
+  }
+};
+
+
+// --- desenha a cauda com ferrão ---
+Scorpion.prototype.drawTail = function() {
+  var s = this.tail.segs;
+
+  // mesma lógica do corpo: 3 passes (contorno, preto, vermelho)
+  for (var i = 0; i < s.length - 1; i++) {
+    var t = i / (s.length - 1);
+    var w = lerp(9, 4, t); // cauda é mais fina que o corpo
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s[i].x, s[i].y);
+    ctx.lineTo(s[i+1].x, s[i+1].y);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth   = w + 2.5;
+    ctx.lineCap     = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+  for (var i = 0; i < s.length - 1; i++) {
+    var t = i / (s.length - 1);
+    var w = lerp(9, 4, t);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s[i].x, s[i].y);
+    ctx.lineTo(s[i+1].x, s[i+1].y);
+    ctx.strokeStyle = '#0a0000';
+    ctx.lineWidth   = w;
+    ctx.lineCap     = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+  for (var i = 0; i < s.length - 1; i++) {
+    var t = i / (s.length - 1);
+    var w = lerp(9, 4, t);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s[i].x, s[i].y);
+    ctx.lineTo(s[i+1].x, s[i+1].y);
+    ctx.strokeStyle = 'rgba(200,0,0,0.5)';
+    ctx.lineWidth   = w * 0.4;
+    ctx.lineCap     = 'round';
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur  = 8;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // bulbo do ferrão (nó 8 = vesícula de veneno)
+  var pre = this.tail.segs[8];
+  var tip = this.tail.segs[9]; // ponta do ferrão
+  ctx.save();
+  // anel branco
+  ctx.beginPath(); ctx.arc(pre.x, pre.y, 9, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 2; ctx.stroke();
+  // bolinha preta
+  ctx.beginPath(); ctx.arc(pre.x, pre.y, 7, 0, Math.PI * 2);
+  ctx.fillStyle  = '#110000';
+  ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 20 * this.stingGlow;
+  ctx.fill();
+  // ponto vermelho no centro
+  ctx.beginPath(); ctx.arc(pre.x, pre.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#cc0000'; ctx.fill();
+  // linha do ferrão
+  ctx.beginPath();
+  ctx.moveTo(pre.x, pre.y); ctx.lineTo(tip.x, tip.y);
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 4; ctx.stroke();
+  ctx.strokeStyle = '#ff2200'; ctx.lineWidth = 2.5;
+  ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 16 * this.stingGlow;
+  ctx.stroke();
+  // ponta do ferrão
+  ctx.beginPath(); ctx.arc(tip.x, tip.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff1100'; ctx.shadowBlur = 20 * this.stingGlow; ctx.fill();
+  ctx.restore();
+};
+
+
+// --- desenha a cabeça com olhos ---
+Scorpion.prototype.drawHead = function() {
+  var h = this.body.segs[0]; // primeiro segmento = cabeça
+  var a = this.angle;
+
+  ctx.save();
+  ctx.translate(h.x, h.y); // move a origem pro ponto da cabeça
+  ctx.rotate(a);            // rotaciona pro ângulo do escorpião
+
+  // --- contorno branco da cabeça ---
+  ctx.beginPath(); ctx.ellipse(4, 0, 18, 13, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 2.5; ctx.stroke();
+
+  // --- preenchimento preto da cabeça ---
+  ctx.beginPath(); ctx.ellipse(4, 0, 16, 11, 0, 0, Math.PI * 2);
+  ctx.fillStyle   = '#0a0000';
+  ctx.shadowColor = '#880000'; ctx.shadowBlur = 18;
+  ctx.fill();
+  ctx.strokeStyle = '#aa0000'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // --- olhos: dois, um em cada lado (s = 1 e s = -1) ---
+  var self = this;
+  [-1, 1].forEach(function(s) {
+    ctx.save();
+    // anel branco
+    ctx.beginPath(); ctx.arc(8, s * 5, 5, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5; ctx.stroke();
+    // socket preto
+    ctx.beginPath(); ctx.arc(8, s * 5, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#000'; ctx.fill();
+    // íris vermelha brilhante
+    ctx.beginPath(); ctx.arc(8, s * 5, 3, 0, Math.PI * 2);
+    ctx.fillStyle   = 'rgba(255,20,0,' + self.eyeGlow + ')';
+    ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 16 * self.eyeGlow;
+    ctx.fill();
+    // reflexo branco (pupila)
+    ctx.beginPath(); ctx.arc(9, s * 5, 1.2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.shadowBlur = 4; ctx.fill();
+    ctx.restore();
+  });
+
+  ctx.restore();
+};
+
+
+//desenha as partículas de veneno
+Scorpion.prototype.drawParticles = function() {
+  for (var i = 0; i < this.particles.length; i++) {
+    var p = this.particles[i];
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle   = 'rgba(255,30,0,' + (p.life * 0.7) + ')'; // some com a vida
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur  = 8;
+    ctx.fill();
+    ctx.restore();
+  }
+};
+
+
+// --- draw principal: chama tudo na ordem certa ---
+Scorpion.prototype.draw = function() {
+  // motion blur: em vez de limpar o canvas, pinto um preto semitransparente
+  // 0.38 = quanto do frame anterior fica visível (menor = rastro mais longo)
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.38)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  this.drawParticles(); // partículas atrás de tudo
+
+  // pernas: de trás pra frente pra ficar na ordem certa
+  for (var i = 7; i >= 0; i--) {
+    var seg = this.body.getPoint(Math.floor(i / 2) + 1);
+    this.legs[i].draw(seg.x, seg.y);
+  }
+
+  this.drawTail(); // cauda antes do corpo pra ficar atrás
+  this.drawBody();
+  this.drawHead();
+
+  // pinças na frente de tudo
+  var headSeg = this.body.segs[0];
+  this.clawL.draw(headSeg.x, headSeg.y, this.angle, this.speed);
+  this.clawR.draw(headSeg.x, headSeg.y, this.angle, this.speed);
+};
+
+// preenche o canvas de preto antes de começar
+ctx.fillStyle = '#000';
+ctx.fillRect(0, 0, W, H);
+
+// cria o escorpião no centro da tela
+var scorpion = new Scorpion();
+
+// loop de animação: update → draw → repete ~60x por segundo
+function loop() {
+  scorpion.update();
+  scorpion.draw();
+  requestAnimationFrame(loop); // agenda o próximo frame
+}
+loop();
+
+</script>
+</body>
+</html>
